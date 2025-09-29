@@ -24,6 +24,9 @@ use bevy::{
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 
+use bevy::input::mouse::MouseMotion;
+use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+
 fn main() {
     App::new()
         .add_plugins((
@@ -37,6 +40,7 @@ fn main() {
             (
                 #[cfg(not(target_arch = "wasm32"))]
                 toggle_wireframe,
+                (camera_movement, camera_look, toggle_cursor_unlock)
             ),
         )
         .run();
@@ -46,46 +50,86 @@ fn main() {
 #[derive(Component)]
 struct Shape;
 
+#[derive(Component)]
+struct Cell {
+    x: usize,
+    y: usize,
+    z: usize,
+}
+
+#[derive(Component)]
+struct FlyCamera {
+    speed: f32,
+    sensitivity: f32,
+    pitch: f32,
+    yaw: f32,
+}
+
 fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    let debug_material = materials.add(StandardMaterial {
-        base_color: Color::srgb(160.0 / 255f32, 1.0, 0.0),
-        ..default()
-    });
+    // let debug_material = materials.add(StandardMaterial {
+    //     base_color: Color::srgb(0.63, 1.0, 0.0),
+    //     ..default()
+    // });
 
-    let size_x = 10;
-    let size_y = 5;
-    let size_z = 8;
+    let size = 10;
 
-    let mut grid = vec![vec![vec![0; size_z]; size_y]; size_x];
+    let mut grid = vec![vec![vec![0; size]; size]; size];
 
-    for i in 0..10 {
-        commands.spawn((
-            Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-            MeshMaterial3d(debug_material.clone()),
-            Transform::from_xyz(
-                i as f32 * 1.2 - 6.0,
-                0.5,
-                0.0,
-            ),
-            Shape,
-        ));
+    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let cube_material = materials.add(Color::srgb(0.63, 1.0, 0.0));
+
+    for x in 0..size {
+        for y in 0..size {
+            for z in 0..size {
+                // Mark this cell as alive
+                grid[x][y][z] = 1;
+
+                // Spawn cube in world
+                commands.spawn((
+                    Mesh3d(cube_mesh.clone()),
+                    MeshMaterial3d(cube_material.clone()),
+                    Transform::from_xyz(
+                        x as f32 * 1.2,
+                        y as f32 * 1.2,
+                        z as f32 * 1.2,
+                    ),
+                    Cell { x, y, z }, // mark which grid cell this entity belongs to
+                ));
+            }
+        }
     }
 
+
+    // commands.spawn((
+    //     PointLight {
+    //         shadows_enabled: true,
+    //         intensity: 10_000_000.,
+    //         range: 100.0,
+    //         shadow_depth_bias: 0.2,
+    //         ..default()
+    //     },
+    //     Transform::from_xyz(8.0, 16.0, 8.0),
+    // ));
     commands.spawn((
-        PointLight {
-            shadows_enabled: true,
-            intensity: 10_000_000.,
-            range: 100.0,
-            shadow_depth_bias: 0.2,
-            ..default()
+        AmbientLight {
+            color: Color::WHITE,
+            brightness: 10.0,
+            affects_lightmapped_meshes: true,
         },
         Transform::from_xyz(8.0, 16.0, 8.0),
     ));
+
+    // commands.insert_resource(AmbientLight {
+    //     color: Color::WHITE,
+    //     brightness: 1.0,
+    //     affects_lightmapped_meshes: true,
+    // });
+
 
     // ground plane
     commands.spawn((
@@ -95,7 +139,13 @@ fn setup(
 
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 7., 14.0).looking_at(Vec3::new(0., 1., 0.), Vec3::Y),
+        Transform::from_xyz(10.0, 10.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
+        FlyCamera {
+            speed: 10.0,
+            sensitivity: 0.002,
+            pitch: 0.0,
+            yaw: -90.0_f32.to_radians(), // facing -Z by default
+        },
     ));
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -116,34 +166,6 @@ fn setup(
 //     }
 // }
 
-/// Creates a colorful test pattern
-// fn uv_debug_texture() -> Image {
-//     const TEXTURE_SIZE: usize = 8;
-//
-//     let mut palette: [u8; 32] = [
-//         255, 102, 159, 255, 255, 159, 102, 255, 236, 255, 102, 255, 121, 255, 102, 255, 102, 255,
-//         198, 255, 102, 198, 255, 255, 121, 102, 255, 255, 236, 102, 255, 255,
-//     ];
-//
-//     let mut texture_data = [0; TEXTURE_SIZE * TEXTURE_SIZE * 4];
-//     for y in 0..TEXTURE_SIZE {
-//         let offset = TEXTURE_SIZE * y * 4;
-//         texture_data[offset..(offset + TEXTURE_SIZE * 4)].copy_from_slice(&palette);
-//         palette.rotate_right(4);
-//     }
-//
-//     Image::new_fill(
-//         Extent3d {
-//             width: TEXTURE_SIZE as u32,
-//             height: TEXTURE_SIZE as u32,
-//             depth_or_array_layers: 1,
-//         },
-//         TextureDimension::D2,
-//         &texture_data,
-//         TextureFormat::Rgba8UnormSrgb,
-//         RenderAssetUsages::RENDER_WORLD,
-//     )
-// }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn toggle_wireframe(
@@ -152,5 +174,107 @@ fn toggle_wireframe(
 ) {
     if keyboard.just_pressed(KeyCode::Space) {
         wireframe_config.global = !wireframe_config.global;
+    }
+}
+
+
+/// Movement with WASD + Space (up) / LShift (down)
+fn camera_movement(
+    time: Res<Time>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut query: Query<(&mut Transform, &FlyCamera)>,
+) {
+    if let Ok((mut transform, cam)) = query.single_mut() {
+        let mut direction = Vec3::ZERO;
+
+        // forward/back/right vectors relative to the camera orientation
+        let forward = transform.forward();
+        let right = transform.right();
+
+        if keys.pressed(KeyCode::KeyW) {
+            direction += *forward;
+        }
+        if keys.pressed(KeyCode::KeyS) {
+            direction -= *forward;
+        }
+        if keys.pressed(KeyCode::KeyA) {
+            direction -= *right;
+        }
+        if keys.pressed(KeyCode::KeyD) {
+            direction += *right;
+        }
+        if keys.pressed(KeyCode::Space) {
+            direction += Vec3::Y;
+        }
+        if keys.pressed(KeyCode::ShiftLeft) {
+            direction -= Vec3::Y;
+        }
+
+        if direction != Vec3::ZERO {
+            transform.translation += direction.normalize() * cam.speed * time.delta_secs();
+        }
+    }
+}
+
+/// Mouse look. Uses MouseMotion events and writes to the camera's rotation.
+/// Also grabs & hides the cursor while there is mouse motion (and sets it initially).
+fn camera_look(
+    mut motion_events: EventReader<MouseMotion>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut query: Query<(&mut Transform, &mut FlyCamera)>,
+) {
+    // Accumulate mouse delta for the frame
+    let mut delta = Vec2::ZERO;
+    for ev in motion_events.read() {
+        delta += ev.delta;
+    }
+    if delta == Vec2::ZERO {
+        return;
+    }
+
+    if let Ok((mut transform, mut flycam)) = query.single_mut() {
+        flycam.yaw -= delta.x * flycam.sensitivity;
+        flycam.pitch -= delta.y * flycam.sensitivity;
+
+        // clamp pitch so camera doesn't flip
+        flycam.pitch = flycam.pitch.clamp(-1.54, 1.54);
+
+        let yaw_rotation = Quat::from_rotation_y(flycam.yaw);
+        let pitch_rotation = Quat::from_rotation_x(flycam.pitch);
+        transform.rotation = yaw_rotation * pitch_rotation;
+    }
+
+    // lock & hide cursor for the primary window
+    if let Ok(mut window) = windows.single_mut() {
+        window.cursor_options = CursorOptions {
+            visible: false,
+            grab_mode: CursorGrabMode::Locked,
+            ..default()
+        };
+    }
+}
+
+/// Press Escape to toggle cursor lock/visibility
+fn toggle_cursor_unlock(keys: Res<ButtonInput<KeyCode>>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+    if keys.just_pressed(KeyCode::Escape) {
+        if let Ok(mut window) = windows.single_mut() {
+            let currently_locked = match window.cursor_options.grab_mode {
+                CursorGrabMode::Locked | CursorGrabMode::Confined => true,
+                CursorGrabMode::None => false,
+            };
+            if currently_locked {
+                window.cursor_options = CursorOptions {
+                    visible: true,
+                    grab_mode: CursorGrabMode::None,
+                    ..default()
+                };
+            } else {
+                window.cursor_options = CursorOptions {
+                    visible: false,
+                    grab_mode: CursorGrabMode::Locked,
+                    ..default()
+                };
+            }
+        }
     }
 }
