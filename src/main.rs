@@ -46,6 +46,12 @@ fn main() {
         .run();
 }
 
+enum Rule {
+    Single(u8),
+    Range(std::ops::RangeInclusive<u8>),
+    Singles(u8),
+}
+
 /// A marker component for our shapes so we can query them separately from the ground plane
 #[derive(Component)]
 struct Shape;
@@ -65,21 +71,29 @@ struct FlyCamera {
     yaw: f32,
 }
 
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // let debug_material = materials.add(StandardMaterial {
-    //     base_color: Color::srgb(0.63, 1.0, 0.0),
-    //     ..default()
-    // });
+fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -> usize {
+    let size = grid.len();
+    let mut count = 0;
 
-    let size = 10;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
 
-    let mut grid = vec![vec![vec![0; size]; size]; size];
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                let nz = z as i32 + dz;
 
+                if nx >= 0 && ny >= 0 && nz >= 0
+                    && (nx as usize) < size
+                    && (ny as usize) < size
+                    && (nz as usize) < size
+                {
+                    if grid[nx as usize][ny as usize][nz as usize] == 1 {
+                        count += 1;
+                    } } } } } count } fn setup( mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>,) { let size = 10; let mut grid = vec![vec![vec![0; size]; size]; size];
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let cube_material = materials.add(Color::srgb(0.63, 1.0, 0.0));
 
@@ -104,32 +118,19 @@ fn setup(
         }
     }
 
+    count_alive_neighbors(&grid, 1, 1, 1);
 
-    // commands.spawn((
-    //     PointLight {
-    //         shadows_enabled: true,
-    //         intensity: 10_000_000.,
-    //         range: 100.0,
-    //         shadow_depth_bias: 0.2,
-    //         ..default()
-    //     },
-    //     Transform::from_xyz(8.0, 16.0, 8.0),
-    // ));
     commands.spawn((
-        AmbientLight {
+        DirectionalLight {
+            illuminance: 1000.0,
+            shadows_enabled: false,
             color: Color::WHITE,
-            brightness: 10.0,
-            affects_lightmapped_meshes: true,
+            shadow_depth_bias: 1.0,
+            shadow_normal_bias: 1.0,
+            affects_lightmapped_mesh_diffuse: false,
         },
-        Transform::from_xyz(8.0, 16.0, 8.0),
+        Transform::from_xyz(8.0, 16.0, 8.0).looking_at(Vec3::ZERO, Vec3::ZERO),
     ));
-
-    // commands.insert_resource(AmbientLight {
-    //     color: Color::WHITE,
-    //     brightness: 1.0,
-    //     affects_lightmapped_meshes: true,
-    // });
-
 
     // ground plane
     commands.spawn((
