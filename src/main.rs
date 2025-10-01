@@ -26,6 +26,8 @@ use bevy::{
 
 use bevy::input::mouse::MouseMotion;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use bevy::app::AppExit;
+use rand::Rng;
 
 fn main() {
     App::new()
@@ -40,10 +42,22 @@ fn main() {
             (
                 #[cfg(not(target_arch = "wasm32"))]
                 toggle_wireframe,
-                (camera_movement, camera_look, toggle_cursor_unlock)
+                (camera_movement, camera_look, handle_exit),
+                simulate_step,
             ),
         )
         .run();
+}
+
+#[derive(Resource)]
+struct Grid {
+    cells: Vec<Vec<Vec<i32>>>,
+    size: usize,
+}
+
+#[derive(Resource)]
+struct SimulationTimer {
+    timer: Timer,
 }
 
 enum Rule {
@@ -61,6 +75,7 @@ struct Cell {
     x: usize,
     y: usize,
     z: usize,
+    state: u8,
 }
 
 #[derive(Component)]
@@ -69,6 +84,55 @@ struct FlyCamera {
     sensitivity: f32,
     pitch: f32,
     yaw: f32,
+}
+
+
+fn simulate_step(
+    time: Res<Time>,
+    mut timer: ResMut<SimulationTimer>,
+    mut grid: ResMut<Grid>,
+    mut cell_query: Query<(&mut Cell, &mut MeshMaterial3d<StandardMaterial>)>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    if !timer.timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let size = grid.size;
+    let mut new_grid = vec![vec![vec![0; size]; size]; size];
+
+    // Calculate next state for each cell
+    for x in 0..size {
+        for y in 0..size {
+            for z in 0..size {
+                let neighbors = count_alive_neighbors(&grid.cells, x, y, z);
+                let current_state = grid.cells[x][y][z];
+
+                // 3D Conway's Game of Life rules (more permissive for 3D)
+                // Alive cells survive with 4-6 neighbors, dead cells born with 4-5 neighbors
+                new_grid[x][y][z] = match current_state {
+                    1 => if neighbors >= 4 && neighbors <= 6 { 1 } else { 0 }, // alive cell
+                    0 => if neighbors >= 4 && neighbors <= 5 { 1 } else { 0 }, // dead cell
+                    _ => 0,
+                };
+            }
+        }
+    }
+
+    // Update the grid
+    grid.cells = new_grid;
+
+    for (mut cell, mut material_handle) in cell_query.iter_mut() {
+        let is_alive = grid.cells[cell.x][cell.y][cell.z] == 1;
+
+        if is_alive {
+            // Green for alive cells
+            *material_handle = MeshMaterial3d(materials.add(Color::srgb(0.0, 1.0, 0.0)));
+        } else {
+            // Red for dead cells (or make them invisible)
+            *material_handle = MeshMaterial3d(materials.add(Color::srgb(1.0, 0.0, 0.0)));
+        }
+    }
 }
 
 fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -> usize {
@@ -93,32 +157,76 @@ fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -
                 {
                     if grid[nx as usize][ny as usize][nz as usize] == 1 {
                         count += 1;
-                    } } } } } count } fn setup( mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut images: ResMut<Assets<Image>>, mut materials: ResMut<Assets<StandardMaterial>>,) { let size = 10; let mut grid = vec![vec![vec![0; size]; size]; size];
+                    }
+                }
+            }
+        }
+    }
+
+    count
+}
+
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let size = 10;
+    let mut grid_cells = vec![vec![vec![0; size]; size]; size];
+
+    // Create truly random initial pattern
+    let mut rng = rand::thread_rng();
+    let alive_probability = 0.15; // 15% chance for each cell to be alive
+
+    for x in 0..size {
+        for y in 0..size {
+            for z in 0..size {
+                if rng.gen::<f64>() < alive_probability {
+                    grid_cells[x][y][z] = 1;
+                }
+            }
+        }
+    }
+
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
     let cube_material = materials.add(Color::srgb(0.63, 1.0, 0.0));
 
     for x in 0..size {
         for y in 0..size {
             for z in 0..size {
-                // Mark this cell as alive
-                grid[x][y][z] = 1;
+                let is_alive = grid_cells[x][y][z] == 1;
+                let material = if is_alive {
+                    materials.add(Color::srgb(0.0, 1.0, 0.0)) // Green for alive
+                } else {
+                    materials.add(Color::srgb(1.0, 0.0, 0.0)) // Red for dead
+                };
 
                 // Spawn cube in world
                 commands.spawn((
                     Mesh3d(cube_mesh.clone()),
-                    MeshMaterial3d(cube_material.clone()),
+                    MeshMaterial3d(material),
                     Transform::from_xyz(
                         x as f32 * 1.2,
                         y as f32 * 1.2,
                         z as f32 * 1.2,
                     ),
-                    Cell { x, y, z }, // mark which grid cell this entity belongs to
+                    Cell { x, y, z, state: grid_cells[x][y][z] as u8 },
                 ));
             }
         }
     }
 
-    count_alive_neighbors(&grid, 1, 1, 1);
+    // Insert the grid as a resource
+    commands.insert_resource(Grid {
+        cells: grid_cells,
+        size,
+    });
+
+    // Insert simulation timer (runs every 1 second)
+    commands.insert_resource(SimulationTimer {
+        timer: Timer::from_seconds(1.0, TimerMode::Repeating),
+    });
 
     commands.spawn((
         DirectionalLight {
@@ -132,11 +240,11 @@ fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -
         Transform::from_xyz(8.0, 16.0, 8.0).looking_at(Vec3::ZERO, Vec3::ZERO),
     ));
 
-    // ground plane
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0).subdivisions(10))),
-        MeshMaterial3d(materials.add(Color::from(SILVER))),
-    ));
+    // // ground plane
+    // commands.spawn((
+    //     Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0).subdivisions(10))),
+    //     MeshMaterial3d(materials.add(Color::from(SILVER))),
+    // ));
 
     commands.spawn((
         Camera3d::default(),
@@ -220,8 +328,8 @@ fn camera_movement(
 /// Mouse look. Uses MouseMotion events and writes to the camera's rotation.
 /// Also grabs & hides the cursor while there is mouse motion (and sets it initially).
 fn camera_look(
-    mut motion_events: EventReader<MouseMotion>,
-    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut motion_events: MessageReader<MouseMotion>,
+    mut cursor_options: Single<&mut CursorOptions>,
     mut query: Query<(&mut Transform, &mut FlyCamera)>,
 ) {
     // Accumulate mouse delta for the frame
@@ -245,37 +353,14 @@ fn camera_look(
         transform.rotation = yaw_rotation * pitch_rotation;
     }
 
-    // lock & hide cursor for the primary window
-    if let Ok(mut window) = windows.single_mut() {
-        window.cursor_options = CursorOptions {
-            visible: false,
-            grab_mode: CursorGrabMode::Locked,
-            ..default()
-        };
-    }
+    // lock & hide cursor
+    cursor_options.visible = false;
+    cursor_options.grab_mode = CursorGrabMode::Locked;
 }
 
-/// Press Escape to toggle cursor lock/visibility
-fn toggle_cursor_unlock(keys: Res<ButtonInput<KeyCode>>, mut windows: Query<&mut Window, With<PrimaryWindow>>) {
+/// Press Escape to exit the program
+fn handle_exit(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
     if keys.just_pressed(KeyCode::Escape) {
-        if let Ok(mut window) = windows.single_mut() {
-            let currently_locked = match window.cursor_options.grab_mode {
-                CursorGrabMode::Locked | CursorGrabMode::Confined => true,
-                CursorGrabMode::None => false,
-            };
-            if currently_locked {
-                window.cursor_options = CursorOptions {
-                    visible: true,
-                    grab_mode: CursorGrabMode::None,
-                    ..default()
-                };
-            } else {
-                window.cursor_options = CursorOptions {
-                    visible: false,
-                    grab_mode: CursorGrabMode::Locked,
-                    ..default()
-                };
-            }
-        }
+        exit.write(AppExit::Success);
     }
 }
