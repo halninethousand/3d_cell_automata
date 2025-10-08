@@ -1,38 +1,38 @@
-//! Here we use shape primitives to generate meshes for 3d objects as well as attaching a runtime-generated patterned texture to each 3d object.
-//!
-//! "Shape primitives" here are just the mathematical definition of certain shapes, they're not meshes on their own! A sphere with radius `1.0` can be defined with [`Sphere::new(1.0)`][Sphere::new] but all this does is store the radius. So we need to turn these descriptions of shapes into meshes.
-//!
-//! While a shape is not a mesh, turning it into one in Bevy is easy. In this example we call [`meshes.add(/* Shape here! */)`][Assets<A>::add] on the shape, which works because the [`Assets<A>::add`] method takes anything that can be turned into the asset type it stores. There's an implementation for [`From`] on shape primitives into [`Mesh`], so that will get called internally by [`Assets<A>::add`].
-//!
-//! [`Extrusion`] lets us turn 2D shape primitives into versions of those shapes that have volume by extruding them. A 1x1 square that gets wrapped in this with an extrusion depth of 2 will give us a rectangular prism of size 1x1x2, but here we're just extruding these 2d shapes by depth 1.
-//!
-//! The material applied to these shapes is a texture that we generate at run time by looping through a "palette" of RGBA values (stored adjacent to each other in the array) and writing values to positions in another array that represents the buffer for an 8x8 texture. This texture is then registered with the assets system just one time, with that [`Handle<StandardMaterial>`] then applied to all the shapes in this example.
-//!
-//! The mesh and material are [`Handle<Mesh>`] and [`Handle<StandardMaterial>`] at the moment, neither of which implement `Component` on their own. Handles are put behind "newtypes" to prevent ambiguity, as some entities might want to have handles to meshes (or images, or materials etc.) for different purposes! All we need to do to make them rendering-relevant components is wrap the mesh handle and the material handle in [`Mesh3d`] and [`MeshMaterial3d`] respectively.
-//!
-//! You can toggle wireframes with the space bar except on wasm. Wasm does not support3
-//! `POLYGON_MODE_LINE` on the gpu.
-
-use std::f32::consts::PI;
+use bevy::{
+    core_pipeline::core_3d::Transparent3d,
+    ecs::system::{lifetimeless::*, SystemParamItem},
+    input::mouse::MouseMotion,
+    pbr::{MeshPipeline, MeshPipelineKey, RenderMeshInstances, SetMeshBindGroup, SetMeshViewBindGroup, SetMeshViewBindingArrayBindGroup},
+    prelude::*,
+    render::{
+        extract_component::{ExtractComponent, ExtractComponentPlugin},
+        mesh::{allocator::MeshAllocator, RenderMesh, RenderMeshBufferInfo},
+        render_asset::RenderAssets,
+        render_phase::{
+            AddRenderCommand, DrawFunctions, PhaseItem, PhaseItemExtraIndex, RenderCommand, RenderCommandResult, SetItemPipeline,
+            TrackedRenderPass, ViewSortedRenderPhases,
+        },
+        render_resource::*,
+        renderer::RenderDevice,
+        sync_world::MainEntity,
+        view::ExtractedView,
+        Render, RenderApp, RenderStartup, RenderSystems,
+    },
+    window::{CursorGrabMode, CursorOptions},
+};
+use bevy_mesh::VertexBufferLayout;
+use bytemuck::{Pod, Zeroable};
+use rand::Rng;
+use std::mem::size_of;
 
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::pbr::wireframe::{WireframeConfig, WireframePlugin};
-use bevy::{
-    asset::RenderAssetUsages,
-    color::palettes::basic::SILVER,
-    prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
-};
-
-use bevy::input::mouse::MouseMotion;
-use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
-use bevy::app::AppExit;
-use rand::Rng;
 
 fn main() {
     App::new()
         .add_plugins((
-            DefaultPlugins.set(ImagePlugin::default_nearest()),
+            DefaultPlugins,
+            CellMaterialPlugin,
             #[cfg(not(target_arch = "wasm32"))]
             WireframePlugin::default(),
         ))
@@ -40,10 +40,12 @@ fn main() {
         .add_systems(
             Update,
             (
+                simulate_step,
+                camera_movement,
+                camera_look,
+                handle_exit,
                 #[cfg(not(target_arch = "wasm32"))]
                 toggle_wireframe,
-                (camera_movement, camera_look, handle_exit),
-                simulate_step,
             ),
         )
         .run();
@@ -51,31 +53,276 @@ fn main() {
 
 #[derive(Resource)]
 struct Grid {
-    cells: Vec<Vec<Vec<i32>>>,
+    cells: Vec<Vec<Vec<u8>>>,
     size: usize,
+    max_state: u8,  // Maximum state value (newly born cells start here)
 }
 
 #[derive(Resource)]
-struct SimulationTimer {
-    timer: Timer,
+struct CellColors {
+    birth_color: Color,   // Color for newly born cells (max_state)
+    death_color: Color,   // Color for dying cells (state 1)
+    materials_cache: Vec<Handle<StandardMaterial>>,  // No longer used with instancing
 }
 
-enum Rule {
-    Single(u8),
-    Range(std::ops::RangeInclusive<u8>),
-    Singles(u8),
+// Instance data that will be sent to the GPU
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct InstanceData {
+    position: Vec3,
+    scale: f32,
+    color: [f32; 4],
 }
 
-/// A marker component for our shapes so we can query them separately from the ground plane
+// Component that holds all instance data
+#[derive(Component, Deref)]
+struct InstanceMaterialData(Vec<InstanceData>);
+
+impl ExtractComponent for InstanceMaterialData {
+    type QueryData = &'static InstanceMaterialData;
+    type QueryFilter = ();
+    type Out = Self;
+
+    fn extract_component(item: bevy::ecs::query::QueryItem<'_, '_, Self::QueryData>) -> Option<Self> {
+        Some(InstanceMaterialData(item.0.clone()))
+    }
+}
+
+// GPU buffer that holds instance data
 #[derive(Component)]
-struct Shape;
+struct InstanceBuffer {
+    buffer: Buffer,
+    length: usize,
+}
+
+// System that prepares instance buffers for rendering
+fn prepare_instance_buffers(
+    mut commands: Commands,
+    query: Query<(Entity, &InstanceMaterialData)>,
+    render_device: Res<RenderDevice>,
+) {
+    for (entity, instance_data) in &query {
+        let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
+            label: Some("instance data buffer"),
+            contents: bytemuck::cast_slice(instance_data.0.as_slice()),
+            usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
+        });
+        commands.entity(entity).insert(InstanceBuffer {
+            buffer,
+            length: instance_data.0.len(),
+        });
+    }
+}
+
+// Custom render pipeline for instanced cells
+#[derive(Resource)]
+struct CellPipeline {
+    shader: Handle<Shader>,
+    mesh_pipeline: MeshPipeline,
+}
+
+fn init_cell_pipeline(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mesh_pipeline: Res<MeshPipeline>,
+) {
+    commands.insert_resource(CellPipeline {
+        shader: asset_server.load("shaders/instancing.wgsl"),
+        mesh_pipeline: mesh_pipeline.clone(),
+    });
+}
+
+impl SpecializedMeshPipeline for CellPipeline {
+    type Key = MeshPipelineKey;
+
+    fn specialize(
+        &self,
+        key: Self::Key,
+        layout: &bevy_mesh::MeshVertexBufferLayoutRef,
+    ) -> Result<RenderPipelineDescriptor, SpecializedMeshPipelineError> {
+        let mut descriptor = self.mesh_pipeline.specialize(key, layout)?;
+
+        descriptor.vertex.shader = self.shader.clone();
+
+        // Create vertex buffer layout for instance data
+        let instance_attrs = [
+            // Position + scale
+            VertexAttribute {
+                format: VertexFormat::Float32x4,
+                offset: 0,
+                shader_location: 3,
+            },
+            // Color
+            VertexAttribute {
+                format: VertexFormat::Float32x4,
+                offset: VertexFormat::Float32x4.size(),
+                shader_location: 4,
+            },
+        ];
+
+        descriptor.vertex.buffers.push(VertexBufferLayout {
+            array_stride: size_of::<InstanceData>() as u64,
+            step_mode: VertexStepMode::Instance,
+            attributes: instance_attrs.to_vec(),
+        });
+
+        descriptor.fragment.as_mut().unwrap().shader = self.shader.clone();
+
+        Ok(descriptor)
+    }
+}
+
+// Custom draw command for instanced rendering
+struct DrawMeshInstanced;
+
+impl<P: PhaseItem> RenderCommand<P> for DrawMeshInstanced {
+    type Param = (
+        SRes<RenderAssets<RenderMesh>>,
+        SRes<RenderMeshInstances>,
+        SRes<MeshAllocator>,
+    );
+    type ViewQuery = ();
+    type ItemQuery = Read<InstanceBuffer>;
+
+    #[inline]
+    fn render<'w>(
+        item: &P,
+        _view: (),
+        instance_buffer: Option<&'w InstanceBuffer>,
+        (meshes, render_mesh_instances, mesh_allocator): SystemParamItem<'w, '_, Self::Param>,
+        pass: &mut TrackedRenderPass<'w>,
+    ) -> RenderCommandResult {
+        // A borrow check workaround.
+        let mesh_allocator = mesh_allocator.into_inner();
+
+        let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(item.main_entity())
+        else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(gpu_mesh) = meshes.into_inner().get(mesh_instance.mesh_asset_id) else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(instance_buffer) = instance_buffer else {
+            return RenderCommandResult::Skip;
+        };
+        let Some(vertex_buffer_slice) =
+            mesh_allocator.mesh_vertex_slice(&mesh_instance.mesh_asset_id)
+        else {
+            return RenderCommandResult::Skip;
+        };
+
+        pass.set_vertex_buffer(0, vertex_buffer_slice.buffer.slice(..));
+        pass.set_vertex_buffer(1, instance_buffer.buffer.slice(..));
+
+        match &gpu_mesh.buffer_info {
+            RenderMeshBufferInfo::Indexed {
+                index_format,
+                count,
+            } => {
+                let Some(index_buffer_slice) =
+                    mesh_allocator.mesh_index_slice(&mesh_instance.mesh_asset_id)
+                else {
+                    return RenderCommandResult::Skip;
+                };
+
+                pass.set_index_buffer(index_buffer_slice.buffer.slice(..), 0, *index_format);
+                pass.draw_indexed(
+                    index_buffer_slice.range.start..(index_buffer_slice.range.start + count),
+                    vertex_buffer_slice.range.start as i32,
+                    0..instance_buffer.length as u32,
+                );
+            }
+            RenderMeshBufferInfo::NonIndexed => {
+                pass.draw(vertex_buffer_slice.range, 0..instance_buffer.length as u32);
+            }
+        }
+        RenderCommandResult::Success
+    }
+}
+
+type DrawCustom = (
+    SetItemPipeline,
+    SetMeshViewBindGroup<0>,
+    SetMeshViewBindingArrayBindGroup<1>,
+    SetMeshBindGroup<2>,
+    DrawMeshInstanced,
+);
+
+// Queue system to add our entities to the render phase
+fn queue_custom(
+    transparent_3d_draw_functions: Res<DrawFunctions<Transparent3d>>,
+    custom_pipeline: Res<CellPipeline>,
+    mut pipelines: ResMut<SpecializedMeshPipelines<CellPipeline>>,
+    pipeline_cache: Res<PipelineCache>,
+    meshes: Res<RenderAssets<RenderMesh>>,
+    render_mesh_instances: Res<RenderMeshInstances>,
+    material_meshes: Query<(Entity, &MainEntity), With<InstanceMaterialData>>,
+    mut transparent_render_phases: ResMut<ViewSortedRenderPhases<Transparent3d>>,
+    views: Query<(&ExtractedView, &Msaa)>,
+) {
+    let draw_custom = transparent_3d_draw_functions.read().id::<DrawCustom>();
+
+    for (view, msaa) in &views {
+        let Some(transparent_phase) = transparent_render_phases.get_mut(&view.retained_view_entity)
+        else {
+            continue;
+        };
+
+        let msaa_key = MeshPipelineKey::from_msaa_samples(msaa.samples());
+        let view_key = msaa_key | MeshPipelineKey::from_hdr(view.hdr);
+        let rangefinder = view.rangefinder3d();
+
+        for (entity, main_entity) in &material_meshes {
+            let Some(mesh_instance) = render_mesh_instances.render_mesh_queue_data(*main_entity)
+            else {
+                continue;
+            };
+            let Some(mesh) = meshes.get(mesh_instance.mesh_asset_id) else {
+                continue;
+            };
+            let key =
+                view_key | MeshPipelineKey::from_primitive_topology(mesh.primitive_topology());
+            let pipeline = pipelines
+                .specialize(&pipeline_cache, &custom_pipeline, key, &mesh.layout)
+                .unwrap();
+            transparent_phase.add(Transparent3d {
+                entity: (entity, *main_entity),
+                pipeline,
+                draw_function: draw_custom,
+                distance: rangefinder.distance_translation(&mesh_instance.translation),
+                batch_range: 0..1,
+                extra_index: PhaseItemExtraIndex::None,
+                indexed: true,
+            });
+        }
+    }
+}
+
+// Plugin that sets up our custom rendering pipeline
+struct CellMaterialPlugin;
+
+impl Plugin for CellMaterialPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(ExtractComponentPlugin::<InstanceMaterialData>::default());
+        app.sub_app_mut(RenderApp)
+            .add_render_command::<Transparent3d, DrawCustom>()
+            .init_resource::<SpecializedMeshPipelines<CellPipeline>>()
+            .add_systems(RenderStartup, init_cell_pipeline)
+            .add_systems(
+                Render,
+                (
+                    queue_custom.in_set(RenderSystems::QueueMeshes),
+                    prepare_instance_buffers.in_set(RenderSystems::PrepareResources),
+                ),
+            );
+    }
+}
 
 #[derive(Component)]
 struct Cell {
     x: usize,
     y: usize,
     z: usize,
-    state: u8,
 }
 
 #[derive(Component)]
@@ -86,56 +333,200 @@ struct FlyCamera {
     yaw: f32,
 }
 
-
-fn simulate_step(
-    time: Res<Time>,
-    mut timer: ResMut<SimulationTimer>,
-    mut grid: ResMut<Grid>,
-    mut cell_query: Query<(&mut Cell, &mut MeshMaterial3d<StandardMaterial>)>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+fn setup(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    if !timer.timer.tick(time.delta()).just_finished() {
-        return;
+    let size = 50;  // Much bigger grid
+    let max_state = 5;  // Rule 445 uses 5 states
+    let mut grid_cells = vec![vec![vec![0; size]; size]; size];
+
+    // Spawn dense cluster in center like the reference repo
+    let mut rng = rand::rng();
+    let center = size as i32 / 2;
+    let radius = 6;
+    let amount = 12 * 12 * 12;  // 1,728 cells
+
+    for _ in 0..amount {
+        let x = (center + rng.random_range(-radius..=radius)) as usize;
+        let y = (center + rng.random_range(-radius..=radius)) as usize;
+        let z = (center + rng.random_range(-radius..=radius)) as usize;
+
+        // Make sure we're in bounds
+        if x < size && y < size && z < size {
+            grid_cells[x][y][z] = max_state;
+        }
     }
 
-    let size = grid.size;
-    let mut new_grid = vec![vec![vec![0; size]; size]; size];
+    // Create color interpolation info
+    let birth_color = Color::srgb(0.67, 1.0, 1.0); // Cyan-ish for max state
+    let death_color = Color::srgb(0.1, 0.1, 0.1);  // Very dark for dying state
 
-    // Calculate next state for each cell
+    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
+    let grid_center = Vec3::new(
+        (size - 1) as f32 * 1.0 / 2.0,
+        (size - 1) as f32 * 1.0 / 2.0,
+        (size - 1) as f32 * 1.0 / 2.0,
+    );
+
+    // Build instance data for all living cells
+    let mut instance_data = Vec::new();
     for x in 0..size {
         for y in 0..size {
             for z in 0..size {
-                let neighbors = count_alive_neighbors(&grid.cells, x, y, z);
-                let current_state = grid.cells[x][y][z];
+                let state = grid_cells[x][y][z];
+                if state > 0 {
+                    // Interpolate color based on state
+                    let t = state as f32 / max_state as f32;
+                    let color = Color::srgb(
+                        death_color.to_srgba().red * (1.0 - t) + birth_color.to_srgba().red * t,
+                        death_color.to_srgba().green * (1.0 - t) + birth_color.to_srgba().green * t,
+                        death_color.to_srgba().blue * (1.0 - t) + birth_color.to_srgba().blue * t,
+                    );
 
-                // 3D Conway's Game of Life rules (more permissive for 3D)
-                // Alive cells survive with 4-6 neighbors, dead cells born with 4-5 neighbors
-                new_grid[x][y][z] = match current_state {
-                    1 => if neighbors >= 4 && neighbors <= 6 { 1 } else { 0 }, // alive cell
-                    0 => if neighbors >= 4 && neighbors <= 5 { 1 } else { 0 }, // dead cell
-                    _ => 0,
+                    let position = Vec3::new(
+                        x as f32 * 1.0 - grid_center.x,
+                        y as f32 * 1.0 - grid_center.y,
+                        z as f32 * 1.0 - grid_center.z,
+                    );
+
+                    instance_data.push(InstanceData {
+                        position,
+                        scale: 1.0,
+                        color: color.to_srgba().to_f32_array(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Spawn single entity with all instances
+    commands.spawn((
+        Mesh3d(cube_mesh),
+        Transform::IDENTITY,
+        Visibility::default(),
+        InstanceMaterialData(instance_data),
+    ));
+
+    commands.insert_resource(Grid {
+        cells: grid_cells,
+        size,
+        max_state,
+    });
+
+    commands.insert_resource(CellColors {
+        birth_color,
+        death_color,
+        materials_cache: Vec::new(), // No longer needed with instancing
+    });
+
+    // Camera looks at origin (grid is centered around origin now)
+    commands.spawn((
+        Camera3d::default(),
+        Transform::from_xyz(50.0, 50.0, 120.0).looking_at(Vec3::ZERO, Vec3::Y),
+        FlyCamera {
+            speed: 50.0,
+            sensitivity: 0.0005,
+            pitch: 0.0,
+            yaw: -90.0_f32.to_radians(),
+        },
+    ));
+}
+
+fn simulate_step(
+    mut grid: ResMut<Grid>,
+    colors: Res<CellColors>,
+    mut instance_query: Query<&mut InstanceMaterialData>,
+    time: Res<Time>,
+    mut last_update: Local<f32>,
+) {
+    if time.elapsed_secs() - *last_update < 0.5 {
+        return;
+    }
+    *last_update = time.elapsed_secs();
+
+    let size = grid.size;
+    let max_state = grid.max_state;
+    let mut new_grid = vec![vec![vec![0; size]; size]; size];
+
+    // Rule 445: survival=4, birth=4, states=5
+    for x in 0..size {
+        for y in 0..size {
+            for z in 0..size {
+                let neighbors = count_neighbors(&grid.cells, x, y, z);
+                let current = grid.cells[x][y][z];
+
+                new_grid[x][y][z] = if current == 0 {
+                    // Dead cell - can be born if exactly 4 neighbors
+                    if neighbors == 4 {
+                        max_state  // Born at maximum state
+                    } else {
+                        0
+                    }
+                } else {
+                    // Living cell (state 1 to max_state)
+                    if current == 1 {
+                        // At state 1, check survival rule
+                        if neighbors == 4 {
+                            max_state  // Survived, refresh to max_state
+                        } else {
+                            0  // Die
+                        }
+                    } else {
+                        // States 2-max_state: decrement (fade toward death)
+                        current - 1
+                    }
                 };
             }
         }
     }
 
-    // Update the grid
     grid.cells = new_grid;
 
-    for (mut cell, mut material_handle) in cell_query.iter_mut() {
-        let is_alive = grid.cells[cell.x][cell.y][cell.z] == 1;
+    // Rebuild instance data for all living cells
+    let grid_center = Vec3::new(
+        (size - 1) as f32 * 1.0 / 2.0,
+        (size - 1) as f32 * 1.0 / 2.0,
+        (size - 1) as f32 * 1.0 / 2.0,
+    );
 
-        if is_alive {
-            // Green for alive cells
-            *material_handle = MeshMaterial3d(materials.add(Color::srgb(0.0, 1.0, 0.0)));
-        } else {
-            // Red for dead cells (or make them invisible)
-            *material_handle = MeshMaterial3d(materials.add(Color::srgb(1.0, 0.0, 0.0)));
+    let mut instance_data = Vec::new();
+    for x in 0..size {
+        for y in 0..size {
+            for z in 0..size {
+                let state = grid.cells[x][y][z];
+                if state > 0 {
+                    // Interpolate color based on state
+                    let t = state as f32 / max_state as f32;
+                    let color = Color::srgb(
+                        colors.death_color.to_srgba().red * (1.0 - t) + colors.birth_color.to_srgba().red * t,
+                        colors.death_color.to_srgba().green * (1.0 - t) + colors.birth_color.to_srgba().green * t,
+                        colors.death_color.to_srgba().blue * (1.0 - t) + colors.birth_color.to_srgba().blue * t,
+                    );
+
+                    let position = Vec3::new(
+                        x as f32 * 1.0 - grid_center.x,
+                        y as f32 * 1.0 - grid_center.y,
+                        z as f32 * 1.0 - grid_center.z,
+                    );
+
+                    instance_data.push(InstanceData {
+                        position,
+                        scale: 1.0,
+                        color: color.to_srgba().to_f32_array(),
+                    });
+                }
+            }
         }
+    }
+
+    // Update the instance buffer
+    if let Ok(mut instances) = instance_query.single_mut() {
+        instances.0 = instance_data;
     }
 }
 
-fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -> usize {
+fn count_neighbors(grid: &[Vec<Vec<u8>>], x: usize, y: usize, z: usize) -> usize {
     let size = grid.len();
     let mut count = 0;
 
@@ -154,10 +545,9 @@ fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -
                     && (nx as usize) < size
                     && (ny as usize) < size
                     && (nz as usize) < size
+                    && grid[nx as usize][ny as usize][nz as usize] >= 1  // Any living state counts
                 {
-                    if grid[nx as usize][ny as usize][nz as usize] == 1 {
-                        count += 1;
-                    }
+                    count += 1;
                 }
             }
         }
@@ -165,127 +555,6 @@ fn count_alive_neighbors(grid: &[Vec<Vec<i32>>], x: usize, y: usize, z: usize) -
 
     count
 }
-
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let size = 10;
-    let mut grid_cells = vec![vec![vec![0; size]; size]; size];
-
-    // Create truly random initial pattern
-    let mut rng = rand::thread_rng();
-    let alive_probability = 0.15; // 15% chance for each cell to be alive
-
-    for x in 0..size {
-        for y in 0..size {
-            for z in 0..size {
-                if rng.gen::<f64>() < alive_probability {
-                    grid_cells[x][y][z] = 1;
-                }
-            }
-        }
-    }
-
-    let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
-    let cube_material = materials.add(Color::srgb(0.63, 1.0, 0.0));
-
-    for x in 0..size {
-        for y in 0..size {
-            for z in 0..size {
-                let is_alive = grid_cells[x][y][z] == 1;
-                let material = if is_alive {
-                    materials.add(Color::srgb(0.0, 1.0, 0.0)) // Green for alive
-                } else {
-                    materials.add(Color::srgb(1.0, 0.0, 0.0)) // Red for dead
-                };
-
-                // Spawn cube in world
-                commands.spawn((
-                    Mesh3d(cube_mesh.clone()),
-                    MeshMaterial3d(material),
-                    Transform::from_xyz(
-                        x as f32 * 1.2,
-                        y as f32 * 1.2,
-                        z as f32 * 1.2,
-                    ),
-                    Cell { x, y, z, state: grid_cells[x][y][z] as u8 },
-                ));
-            }
-        }
-    }
-
-    // Insert the grid as a resource
-    commands.insert_resource(Grid {
-        cells: grid_cells,
-        size,
-    });
-
-    // Insert simulation timer (runs every 1 second)
-    commands.insert_resource(SimulationTimer {
-        timer: Timer::from_seconds(1.0, TimerMode::Repeating),
-    });
-
-    commands.spawn((
-        DirectionalLight {
-            illuminance: 1000.0,
-            shadows_enabled: false,
-            color: Color::WHITE,
-            shadow_depth_bias: 1.0,
-            shadow_normal_bias: 1.0,
-            affects_lightmapped_mesh_diffuse: false,
-        },
-        Transform::from_xyz(8.0, 16.0, 8.0).looking_at(Vec3::ZERO, Vec3::ZERO),
-    ));
-
-    // // ground plane
-    // commands.spawn((
-    //     Mesh3d(meshes.add(Plane3d::default().mesh().size(50.0, 50.0).subdivisions(10))),
-    //     MeshMaterial3d(materials.add(Color::from(SILVER))),
-    // ));
-
-    commands.spawn((
-        Camera3d::default(),
-        Transform::from_xyz(10.0, 10.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
-        FlyCamera {
-            speed: 10.0,
-            sensitivity: 0.002,
-            pitch: 0.0,
-            yaw: -90.0_f32.to_radians(), // facing -Z by default
-        },
-    ));
-
-    #[cfg(not(target_arch = "wasm32"))]
-    commands.spawn((
-        Text::new("Press space to toggle wireframes"),
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(22.0), 
-            left: Val::Px(22.0),
-            ..default()
-        },
-    ));
-}
-
-// fn rotate(mut query: Query<&mut Transform, With<Shape>>, time: Res<Time>) {
-//     for mut transform in &mut query {
-//         transform.rotate_y(time.delta_secs() / 2.);
-//     }
-// }
-
-
-#[cfg(not(target_arch = "wasm32"))]
-fn toggle_wireframe(
-    mut wireframe_config: ResMut<WireframeConfig>,
-    keyboard: Res<ButtonInput<KeyCode>>,
-) {
-    if keyboard.just_pressed(KeyCode::Space) {
-        wireframe_config.global = !wireframe_config.global;
-    }
-}
-
 
 /// Movement with WASD + Space (up) / LShift (down)
 fn camera_movement(
@@ -296,7 +565,6 @@ fn camera_movement(
     if let Ok((mut transform, cam)) = query.single_mut() {
         let mut direction = Vec3::ZERO;
 
-        // forward/back/right vectors relative to the camera orientation
         let forward = transform.forward();
         let right = transform.right();
 
@@ -325,14 +593,13 @@ fn camera_movement(
     }
 }
 
-/// Mouse look. Uses MouseMotion events and writes to the camera's rotation.
-/// Also grabs & hides the cursor while there is mouse motion (and sets it initially).
+/// Mouse look with cursor grab
 fn camera_look(
     mut motion_events: MessageReader<MouseMotion>,
+    windows: Query<&mut Window>,
     mut cursor_options: Single<&mut CursorOptions>,
     mut query: Query<(&mut Transform, &mut FlyCamera)>,
 ) {
-    // Accumulate mouse delta for the frame
     let mut delta = Vec2::ZERO;
     for ev in motion_events.read() {
         delta += ev.delta;
@@ -345,22 +612,34 @@ fn camera_look(
         flycam.yaw -= delta.x * flycam.sensitivity;
         flycam.pitch -= delta.y * flycam.sensitivity;
 
-        // clamp pitch so camera doesn't flip
-        flycam.pitch = flycam.pitch.clamp(-1.54, 1.54);
+        // Allow full 360 degree vertical rotation - no clamp
+        // flycam.pitch = flycam.pitch.clamp(-1.54, 1.54);
 
         let yaw_rotation = Quat::from_rotation_y(flycam.yaw);
         let pitch_rotation = Quat::from_rotation_x(flycam.pitch);
         transform.rotation = yaw_rotation * pitch_rotation;
     }
 
-    // lock & hide cursor
-    cursor_options.visible = false;
-    cursor_options.grab_mode = CursorGrabMode::Locked;
+    // Lock cursor
+    if let Ok(_window) = windows.single() {
+        cursor_options.visible = false;
+        cursor_options.grab_mode = CursorGrabMode::Locked;
+    }
 }
 
-/// Press Escape to exit the program
+/// Press Escape to exit
 fn handle_exit(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
     if keys.just_pressed(KeyCode::Escape) {
         exit.write(AppExit::Success);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn toggle_wireframe(
+    mut wireframe_config: ResMut<WireframeConfig>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+) {
+    if keyboard.just_pressed(KeyCode::KeyT) {
+        wireframe_config.global = !wireframe_config.global;
     }
 }
