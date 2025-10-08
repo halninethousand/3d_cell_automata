@@ -42,8 +42,8 @@ fn setup(
 ) {
     // Create the cellular automaton rule - try different rules!
     // let rule = Rule::rule_445();
-    // let rule = Rule::builder();
-    let rule = Rule::pretty_crystals();  // Try this one - it's visually interesting!
+    let rule = Rule::builder();
+    // let rule = Rule::pretty_crystals();  // Try this one - it's visually interesting!
     // let rule = Rule::fancy_snancy();
     // let rule = Rule::expanding_blob();
 

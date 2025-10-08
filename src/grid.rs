@@ -148,8 +148,8 @@ pub struct CellColors {
 impl Default for CellColors {
     fn default() -> Self {
         Self {
-            birth_color: Color::srgb(1.0, 0.0, 0.0),
-            death_color: Color::srgb(0.0, 1.0, 0.0),
+            birth_color: Color::srgb(1.0, 1.0, 0.0),
+            death_color: Color::srgb(1.0, 0.0, 0.0),
         }
     }
 }
