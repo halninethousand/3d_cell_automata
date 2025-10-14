@@ -40,18 +40,36 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    // Create the cellular automaton rule - try different rules!
-    // let rule = Rule::rule_445();
-    let rule = Rule::builder();
-    // let rule = Rule::pretty_crystals();  // Try this one - it's visually interesting!
-    // let rule = Rule::fancy_snancy();
-    // let rule = Rule::expanding_blob();
+    // Preset rules from various sources:
+    // let rule = Rule::rule_445();           // Classic 4/4/5 rule
+    // let rule = Rule::builder();            // Complex expanding structures
+    // let rule = Rule::pretty_crystals();    // Crystalline formations
+    // let rule = Rule::fancy_snancy();       // Chaotic patterns
+    // let rule = Rule::expanding_blob();     // Slowly growing blob
+
+    // Rules from Softology blog (https://softologyblog.wordpress.com/2019/12/28/3d-cellular-automata-3/)
+    // let rule = Rule::clouds_1();           // Cloud-like wispy structures
+    // let rule = Rule::amoeba();             // Morphing blob organism
+    // let rule = Rule::architecture();       // Architectural structures
+    // let rule = Rule::brain();              // Brain-like tissue
+    // let rule = Rule::builder_2();          // Builder variant
+    // let rule = Rule::coral();              // Coral-like branching
+    // let rule = Rule::crystal_growth_1();   // Growing crystals
+    // let rule = Rule::diamond_growth();     // Diamond-like crystals
+    // let rule = Rule::pulse_waves();        // Wave-like pulses
+    // let rule = Rule::pyroclastic();        // Explosive volcanic patterns
+    // let rule = Rule::spiky_growth();       // Spiky protrusions
+    // let rule = Rule::shells();             // Shell-like layers
+
+    // Rule notation: survival/birth/states/method
+    // 4-7/6-8/10/M means: survive with 4-7 neighbors, birth with 6-8, 10 states, Moore
+    let rule = Rule::from_ranges(4, 6, 5, 6, 11, rule::NeighborMethod::Moore);
 
     println!("Using rule with {} states", rule.states);
     let max_state = rule.states;
 
     // Initialize grid
-    let size = 50;
+    let size = 70;
     let mut grid = Grid::new(size);
 
     // Spawn dense cluster in center like the reference repo
