@@ -99,6 +99,14 @@ impl RuleValue {
         Self { bitmask }
     }
 
+    /// Combine multiple rule values with OR (union of conditions)
+    /// Example: "5-10, 12, 14" = from_range(5,10).or(new(&[12, 14]))
+    pub fn or(self, other: Self) -> Self {
+        Self {
+            bitmask: self.bitmask | other.bitmask,
+        }
+    }
+
     /// Check if a neighbor count matches this rule
     /// This is a single bit check - extremely fast!
     #[inline]
@@ -179,6 +187,22 @@ impl Rule {
         Self {
             survival: RuleValue::new(survival),
             birth: RuleValue::new(birth),
+            states,
+            neighbor_method,
+        }
+    }
+
+    /// Create a rule from ranges
+    /// Example: survival 4-7, birth 6-8, 10 states, Moore
+    pub fn from_ranges(
+        survival_min: u8, survival_max: u8,
+        birth_min: u8, birth_max: u8,
+        states: u8,
+        neighbor_method: NeighborMethod
+    ) -> Self {
+        Self {
+            survival: RuleValue::from_range(survival_min, survival_max),
+            birth: RuleValue::from_range(birth_min, birth_max),
             states,
             neighbor_method,
         }
