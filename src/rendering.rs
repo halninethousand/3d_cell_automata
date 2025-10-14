@@ -59,6 +59,11 @@ fn prepare_instance_buffers(
     render_device: Res<RenderDevice>,
 ) {
     for (entity, instance_data) in &query {
+        // Skip creating empty buffers (when all cells are dead)
+        if instance_data.0.is_empty() {
+            continue;
+        }
+
         let buffer = render_device.create_buffer_with_data(&BufferInitDescriptor {
             label: Some("instance data buffer"),
             contents: bytemuck::cast_slice(instance_data.0.as_slice()),
