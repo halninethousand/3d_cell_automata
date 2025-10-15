@@ -4,6 +4,19 @@ use rand::Rng;
 use crate::rule::Rule;
 use crate::rendering::InstanceMaterialData;
 
+/// Color interpolation method for cells
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ColorMethod {
+    /// Interpolate color based on cell state (dead→alive)
+    StateLerp,
+    /// Interpolate color based on distance from grid center
+    DistToCenter,
+    /// Interpolate color based on neighbor count
+    Neighbor,
+    /// Single color for all cells
+    Single,
+}
+
 /// Cell data with persistent neighbor count for fast simulation
 #[derive(Clone, Copy)]
 struct Cell {
@@ -106,21 +119,36 @@ impl Grid {
     /// Build instance data for rendering
     pub fn build_instances(&self, colors: &CellColors, max_state: u8) -> Vec<crate::rendering::InstanceData> {
         let grid_center = Vec3::splat((self.size - 1) as f32 * 0.5);
+        let max_distance = grid_center.length(); // Max distance from center to corner
         let mut instance_data = Vec::new();
 
         for (index, cell) in self.cells.iter().enumerate() {
             if cell.value > 0 {
                 let pos = self.index_to_pos(index);
-
-                // Interpolate color based on state
-                let t = cell.value as f32 / max_state as f32;
-                let color = Color::srgb(
-                    colors.death_color.to_srgba().red * (1.0 - t) + colors.birth_color.to_srgba().red * t,
-                    colors.death_color.to_srgba().green * (1.0 - t) + colors.birth_color.to_srgba().green * t,
-                    colors.death_color.to_srgba().blue * (1.0 - t) + colors.birth_color.to_srgba().blue * t,
-                );
-
                 let position = pos.as_vec3() - grid_center;
+
+                // Calculate color based on the selected method
+                let t = match colors.method {
+                    ColorMethod::StateLerp => {
+                        // Interpolate based on cell state (0=death_color, max_state=birth_color)
+                        cell.value as f32 / max_state as f32
+                    }
+                    ColorMethod::DistToCenter => {
+                        // Interpolate based on distance from center (center=death_color, edge=birth_color)
+                        position.length() / max_distance
+                    }
+                    ColorMethod::Neighbor => {
+                        // Interpolate based on neighbor count (0=death_color, max=birth_color)
+                        let max_neighbors = 26.0; // Moore neighborhood
+                        cell.neighbors as f32 / max_neighbors
+                    }
+                    ColorMethod::Single => {
+                        // Just use birth_color for all cells
+                        1.0
+                    }
+                };
+
+                let color = colors.lerp_color(t);
 
                 instance_data.push(crate::rendering::InstanceData {
                     position,
@@ -143,6 +171,7 @@ impl Grid {
 pub struct CellColors {
     pub birth_color: Color,
     pub death_color: Color,
+    pub method: ColorMethod,
 }
 
 impl Default for CellColors {
@@ -150,7 +179,21 @@ impl Default for CellColors {
         Self {
             birth_color: Color::srgb(1.0, 1.0, 0.0),
             death_color: Color::srgb(1.0, 0.0, 0.0),
+            method: ColorMethod::StateLerp,
         }
+    }
+}
+
+impl CellColors {
+    /// Helper to interpolate between two colors
+    fn lerp_color(&self, t: f32) -> Color {
+        let c1 = self.death_color.to_srgba();
+        let c2 = self.birth_color.to_srgba();
+        Color::srgb(
+            c1.red * (1.0 - t) + c2.red * t,
+            c1.green * (1.0 - t) + c2.green * t,
+            c1.blue * (1.0 - t) + c2.blue * t,
+        )
     }
 }
 

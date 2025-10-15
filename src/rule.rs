@@ -305,6 +305,56 @@ impl Rule {
         }
     }
 
+    /// "VN Pyramid" - Von Neumann pyramid structure (0-6/1,3/2/V)
+    pub fn vn_pyramid() -> Self {
+        Self {
+            survival: RuleValue::from_range(0, 6),
+            birth: RuleValue::new(&[1, 3]),
+            states: 2,
+            neighbor_method: NeighborMethod::VonNeumann,
+        }
+    }
+
+    /// "Swapping Structures" - Constantly morphing patterns (3,6,9/4,8,10/20/M)
+    pub fn swapping_structures() -> Self {
+        Self {
+            survival: RuleValue::new(&[3, 6, 9]),
+            birth: RuleValue::new(&[4, 8, 10]),
+            states: 20,
+            neighbor_method: NeighborMethod::Moore,
+        }
+    }
+
+    /// "Expand Then Die" - Explosive growth followed by collapse (4/3/20/M)
+    pub fn expand_then_die() -> Self {
+        Self {
+            survival: RuleValue::new(&[4]),
+            birth: RuleValue::new(&[3]),
+            states: 20,
+            neighbor_method: NeighborMethod::Moore,
+        }
+    }
+
+    /// "Spikey Growth" - Creates complex spikey patterns (6-7/4,6,9-11/6/M)
+    pub fn spikey_growth_complex() -> Self {
+        Self {
+            survival: RuleValue::from_range(6, 7),
+            birth: RuleValue::new(&[4, 6, 9, 10, 11]),
+            states: 6,
+            neighbor_method: NeighborMethod::Moore,
+        }
+    }
+
+    /// "Large Lines" - Creates large linear structures (5/4,6,9-11,16-24/35/M)
+    pub fn large_lines() -> Self {
+        Self {
+            survival: RuleValue::new(&[5]),
+            birth: RuleValue::new(&[4, 6, 9, 10, 11, 16, 17, 18, 19, 20, 21, 22, 23, 24]),
+            states: 35,
+            neighbor_method: NeighborMethod::Moore,
+        }
+    }
+
     /// Create a custom rule
     pub fn new(survival: &[u8], birth: &[u8], states: u8, neighbor_method: NeighborMethod) -> Self {
         Self {

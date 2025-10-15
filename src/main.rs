@@ -9,7 +9,7 @@ mod rendering;
 mod rule;
 
 use camera::{camera_look, camera_movement, handle_exit, FlyCamera};
-use grid::{simulate_step, CellColors, Grid};
+use grid::{simulate_step, CellColors, ColorMethod, Grid};
 use rendering::{CellMaterialPlugin, InstanceMaterialData};
 use rule::Rule;
 
@@ -61,24 +61,32 @@ fn setup(
     // let rule = Rule::spiky_growth();       // Spiky protrusions
     // let rule = Rule::shells();             // Shell-like layers
 
+    // let rule = Rule::vn_pyramid();         // Von Neumann pyramid structure
+    let rule = Rule::swapping_structures(); // Constantly morphing patterns
+    // let rule = Rule::expand_then_die();    // Explosive growth → collapse
+    // let rule = Rule::spikey_growth_complex(); // Complex spikey patterns
+    // let rule = Rule::large_lines();        // Large linear structures (35 states!)
+
     // Rule notation: survival/birth/states/method
     // 4-7/6-8/10/M means: survive with 4-7 neighbors, birth with 6-8, 10 states, Moore
-    let rule = Rule::from_ranges(4, 6, 5, 6, 11, rule::NeighborMethod::Moore);
+    // let rule = Rule::from_ranges(4, 6, 5, 6, 11, rule::NeighborMethod::Moore);
 
     println!("Using rule with {} states", rule.states);
     let max_state = rule.states;
 
     // Initialize grid
-    let size = 70;
+    let size = 64;
     let mut grid = Grid::new(size);
 
     // Spawn dense cluster in center like the reference repo
     grid.spawn_center_cluster(&rule, max_state, 6, 12 * 12 * 12);
 
     // Create color interpolation info
+    // Try different color methods: StateLerp, DistToCenter, Neighbor, Single
     let colors = CellColors {
         birth_color: Color::srgb(1.0, 1.0, 0.0),
         death_color: Color::srgb(1.0, 0.0, 0.0),
+        method: ColorMethod::DistToCenter,        // Shows depth/3D structure nicely!
     };
 
     let cube_mesh = meshes.add(Cuboid::new(1.0, 1.0, 1.0));
